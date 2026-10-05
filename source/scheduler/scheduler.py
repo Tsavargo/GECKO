@@ -1,4 +1,5 @@
 import multiprocessing
+from abc import ABC, abstractmethod
 from collections.abc import Callable
 from multiprocessing.connection import Connection, wait
 import os
@@ -22,32 +23,33 @@ def workerLimit() -> int:
     return max(1, limit)
 
 
-def runner(task: Task, connection: Connection) -> None:
+def execute(task: Task, connection: Connection) -> None:
     start = time.perf_counter()
     try:
         task.handler(task.data, Proxy(connection))
-    except Exception:
+    except (Exception, SystemExit):
         connection.send(ErrorMessage(traceback.format_exc()))
     connection.send(TimeMessage(start, time.perf_counter()))
 
 
 
 # SCHEDULER
-class Scheduler:
+class Scheduler(ABC):
     def __init__(self, queue: PriorityQueue[Task], onOutput: Callable[[str, Any], None], log: Callable[..., None]) -> None:
         self.queue = queue
         self.onOutput = onOutput
         self.log = log
         self.limit = workerLimit()
         self.context = multiprocessing.get_context("fork")
-        self.workers: dict[Connection, multiprocessing.Process] = {}
+        self.busy: dict[Connection, multiprocessing.Process] = {}
 
-    def spawn(self, task: Task) -> None:
-        reader, writer = self.context.Pipe(duplex=False)
-        process = self.context.Process(target=runner, args=(task, writer))
-        process.start()
-        writer.close()
-        self.workers[reader] = process
+    @abstractmethod
+    def dispatch(self, task: Task) -> None:
+        """Start the task on a worker and register its connection in self.busy."""
+
+    @abstractmethod
+    def release(self, connection: Connection) -> None:
+        """Called when the worker behind the connection has finished its task."""
 
     def handle(self, message: Message) -> None:
         match message:
@@ -60,21 +62,37 @@ class Scheduler:
             case _:
                 self.log(logging.WARNING, "UNKNOWN_MESSAGE", message=repr(message))
 
-    def reap(self, reader: Connection) -> None:
-        process = self.workers.pop(reader)
-        reader.close()
+    def retire(self, connection: Connection) -> multiprocessing.Process:
+        process = self.busy.pop(connection)
+        connection.close()
         process.join()
-        if process.exitcode:
-            self.log(logging.WARNING, "WORKER_DIED", exitCode=process.exitcode)
+        return process
+
+    def reap(self, connection: Connection) -> None:
+        self.log(logging.WARNING, "WORKER_DIED", exitCode=self.retire(connection).exitcode)
+
+    def shutdown(self) -> None:
+        for connection, process in self.busy.items():
+            process.kill()
+            connection.close()
+            process.join()
+        self.busy.clear()
 
     def run(self) -> None:
-        while True:
-            while len(self.workers) < self.limit and (task := self.queue.pop()) is not None:
-                self.spawn(task)
-            if not self.workers:
-                return
-            for reader in wait(list[Connection](self.workers)):
-                try:
-                    self.handle(reader.recv())
-                except EOFError:
-                    self.reap(reader)
+        try:
+            while True:
+                while len(self.busy) < self.limit and (task := self.queue.pop()) is not None:
+                    self.dispatch(task)
+                if not self.busy:
+                    return
+                for connection in wait(list[Connection](self.busy)):
+                    try:
+                        message = connection.recv()
+                    except EOFError:
+                        self.reap(connection)
+                        continue
+                    self.handle(message)
+                    if isinstance(message, TimeMessage):
+                        self.release(connection)
+        finally:
+            self.shutdown()

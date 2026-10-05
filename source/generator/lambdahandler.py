@@ -9,11 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from awsutil import sqs
-from scheduler.datatypes import Task
-from scheduler.priorityqueue import PriorityQueue
-from scheduler.proxy import Proxy
-from scheduler.scheduler import Scheduler
-
+from scheduler import PriorityQueue, Proxy, Task, OneShotScheduler
 
 logging.basicConfig(level=logging.INFO)
 
@@ -64,7 +60,7 @@ def onOutput(key: str, output: Any) -> None:
 
 functions = loadFunctions(COMPOSITE_DIR.joinpath("config.json"))
 queue = PriorityQueue[Task](max(function.priority for function in functions.values()) + 1)
-scheduler = Scheduler(queue, onOutput, log)
+scheduler = OneShotScheduler(queue, onOutput, log)
 
 if OUTPUT_QUEUE_URL:
     sqs.sqsClient()
