@@ -2,6 +2,8 @@ import argparse
 import json
 import shutil
 import sys
+import tempfile
+import zipfile
 from pathlib import Path
 
 
@@ -39,7 +41,7 @@ def generateComposite(group: dict, inputDir: Path, compositeDir: Path) -> None:
     shutil.copyfile(LAMBDA_HANDLER_FILE, compositeDir.joinpath("lambda_function.py"))
 
 
-def generate(inputDir: Path, outputDir: Path) -> None:
+def generateFromDirectory(inputDir: Path, outputDir: Path) -> None:
     groups = loadGroups(inputDir)
 
     shutil.rmtree(outputDir, ignore_errors=True)
@@ -53,17 +55,41 @@ def generate(inputDir: Path, outputDir: Path) -> None:
         print(f"Generated '{compositeDir.name}' with {len(group['functions'])} atomic function(s)")
 
 
+def findApplicationRoot(archive: zipfile.ZipFile) -> str:
+    names = archive.namelist()
+    if "groups.json" in names:
+        return ""
+    directory = names[0].split("/", 1)[0] if names else ""
+    if f"{directory}/groups.json" in names:
+        return directory
+    raise ValueError(f"{archive.filename}: groups.json must be at the root of the archive or one directory deep")
+
+
+def generateFromZip(zipPath: Path, outputDir: Path) -> None:
+    with zipfile.ZipFile(zipPath) as archive:
+        root = findApplicationRoot(archive)
+        with tempfile.TemporaryDirectory(prefix="gecko-") as extractDir:
+            archive.extractall(extractDir)
+            generateFromDirectory(Path(extractDir).joinpath(root), outputDir)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="generator",
         description="The Generator assembles the composite functions from the provided source codes and the groups.json file"
     )
-    parser.add_argument(
+    inputGroup = parser.add_mutually_exclusive_group(required=True)
+    inputGroup.add_argument(
         "-i",
         "--input",
         type=Path,
-        required=True,
         help="Path of the application directory that contains the source code of the functions and the JSON file"
+    )
+    inputGroup.add_argument(
+        "-z",
+        "--zip",
+        type=Path,
+        help="Path of a zip archive with the same content as the application directory (groups.json at its root or one directory deep)"
     )
     parser.add_argument(
         "-o",
@@ -75,8 +101,11 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        generate(args.input, args.output)
-    except (OSError, ValueError, KeyError) as error:
+        if args.zip is not None:
+            generateFromZip(args.zip, args.output)
+        else:
+            generateFromDirectory(args.input, args.output)
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile) as error:
         print(f"\n{error}\n", file=sys.stderr)
         sys.exit(1)
 
