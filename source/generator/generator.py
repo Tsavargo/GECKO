@@ -62,7 +62,7 @@ def findApplicationRoot(archive: zipfile.ZipFile) -> str:
     directory = names[0].split("/", 1)[0] if names else ""
     if f"{directory}/groups.json" in names:
         return directory
-    raise ValueError(f"{archive.filename}: groups.json must be at the root of the archive or one directory deep")
+    raise ValueError(f"{archive.filename or 'zip archive'}: groups.json must be at the root of the archive or one directory deep")
 
 
 def generateFromZip(zipPath: Path, outputDir: Path) -> None:

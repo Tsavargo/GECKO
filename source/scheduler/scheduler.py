@@ -8,7 +8,7 @@ import traceback
 from typing import Any
 import logging
 
-from .datatypes import ErrorMessage, Message, OutputMessage, Task, TimeMessage
+from .datatypes import ErrorMessage, Function, Message, OutputMessage, Task, TimeMessage
 from .priorityqueue import PriorityQueue
 from .proxy import Proxy
 
@@ -35,10 +35,12 @@ def execute(task: Task, connection: Connection) -> None:
 
 # SCHEDULER
 class Scheduler(ABC):
-    def __init__(self, queue: PriorityQueue[Task], onOutput: Callable[[str, Any], None], log: Callable[..., None]) -> None:
-        self.queue = queue
-        self.onOutput = onOutput
+    def __init__(self, functions: dict[str, Function], onExit: Callable[[str, Any], None], log: Callable[..., None]) -> None:
+        self.functions = functions
+        self.onExit = onExit
         self.log = log
+        self.depth = max((function.priority for function in functions.values()), default=0) + 1
+        self.queue = PriorityQueue[Task](self.depth)
         self.limit = workerLimit()
         self.context = multiprocessing.get_context("fork")
         self.busy: dict[Connection, multiprocessing.Process] = {}
@@ -51,10 +53,21 @@ class Scheduler(ABC):
     def release(self, connection: Connection) -> None:
         """Called when the worker behind the connection has finished its task."""
 
+    def submit(self, key: str, output: Any) -> None:
+        """Entry point for every output: the initial input and the outputs of the workers."""
+        function = self.functions.get(key)
+        if function is None:
+            self.onExit(key, output)
+        else:
+            self.enqueue(key, Task(output, function.handler), function.priority)
+
+    def enqueue(self, key: str, task: Task, priority: int) -> None:
+        self.queue.register(task, priority)
+
     def handle(self, message: Message) -> None:
         match message:
             case OutputMessage(key, output):
-                self.onOutput(key, output)
+                self.submit(key, output)
             case TimeMessage(start, end):
                 self.log(logging.INFO, "TASK_FINISHED", durationMs=round((end - start) * 1000, 3))
             case ErrorMessage(error):
@@ -78,21 +91,28 @@ class Scheduler(ABC):
             process.join()
         self.busy.clear()
 
+    def collect(self) -> None:
+        for connection in wait(list[Connection](self.busy)):
+            try:
+                message = connection.recv()
+            except EOFError:
+                self.reap(connection)
+                continue
+            self.handle(message)
+            if isinstance(message, TimeMessage):
+                self.release(connection)
+
+    def drain(self) -> None:
+        """Runs the queued tasks (and the tasks they produce) until nothing is queued or running."""
+        while True:
+            while len(self.busy) < self.limit and (task := self.queue.pop()) is not None:
+                self.dispatch(task)
+            if not self.busy:
+                return
+            self.collect()
+
     def run(self) -> None:
         try:
-            while True:
-                while len(self.busy) < self.limit and (task := self.queue.pop()) is not None:
-                    self.dispatch(task)
-                if not self.busy:
-                    return
-                for connection in wait(list[Connection](self.busy)):
-                    try:
-                        message = connection.recv()
-                    except EOFError:
-                        self.reap(connection)
-                        continue
-                    self.handle(message)
-                    if isinstance(message, TimeMessage):
-                        self.release(connection)
+            self.drain()
         finally:
             self.shutdown()

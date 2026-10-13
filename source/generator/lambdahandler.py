@@ -3,18 +3,19 @@ import json
 import logging
 import os
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from awsutil import sqs
-from scheduler import PersistentScheduler, PriorityQueue, Proxy, Task, OneShotScheduler
+from scheduler import Function, OneShotScheduler, PersistentScheduler, Proxy, Scheduler, ForkJoinScheduler
 
 logging.basicConfig(level=logging.INFO)
 
 COMPOSITE_DIR: Path = Path(__file__).resolve().parent
 OUTPUT_QUEUE_URL: str = os.environ.get("OUTPUT_QUEUE_URL", "")
+SCHEDULER_NAME: str = os.environ.get("SCHEDULER", "persistent")
+SCHEDULERS: dict[str, type[Scheduler]] = {"persistent": PersistentScheduler, "oneshot": OneShotScheduler, "forkjoin": ForkJoinScheduler}
 
 logger = logging.getLogger("composite")
 logger.setLevel(logging.INFO)
@@ -22,13 +23,6 @@ logger.setLevel(logging.INFO)
 
 def log(level: int, event: str, **fields: Any) -> None:
     logger.log(level, json.dumps({"time": datetime.now(timezone.utc).isoformat(), "event": event, **fields}, default=str))
-
-
-@dataclass
-class Function:
-    name: str
-    handler: Callable[[Any, Proxy], None]
-    priority: int
 
 
 def loadHandler(name: str) -> Callable[[Any, Proxy], None]:
@@ -48,19 +42,17 @@ def loadFunctions(configPath: Path) -> dict[str, Function]:
     return functions
 
 
-def onOutput(key: str, output: Any) -> None:
-    function = functions.get(key)
-    if function is not None:
-        queue.register(Task(output, function.handler), function.priority)
-    elif OUTPUT_QUEUE_URL:
+def onExit(key: str, output: Any) -> None:
+    if OUTPUT_QUEUE_URL:
         sqs.publishMessage(OUTPUT_QUEUE_URL, output, key)
     else:
         log(logging.INFO, "PIPELINE_FINISHED", key=key, output=output)
 
 
 functions = loadFunctions(COMPOSITE_DIR.joinpath("config.json"))
-queue = PriorityQueue[Task](max(function.priority for function in functions.values()) + 1)
-scheduler = PersistentScheduler(queue, onOutput, log)
+if SCHEDULER_NAME not in SCHEDULERS:
+    raise ValueError(f"SCHEDULER: unknown scheduler {SCHEDULER_NAME!r}, expected one of {list(SCHEDULERS)}")
+scheduler = SCHEDULERS[SCHEDULER_NAME](functions, onExit, log)
 
 if OUTPUT_QUEUE_URL:
     sqs.sqsClient()
@@ -68,5 +60,5 @@ if OUTPUT_QUEUE_URL:
 
 def lambda_handler(event: dict[str, Any], context: Any) -> None:
     record = event["Records"][0]
-    onOutput(record["messageAttributes"]["key"]["stringValue"], json.loads(record["body"]))
+    scheduler.submit(record["messageAttributes"]["key"]["stringValue"], json.loads(record["body"]))
     scheduler.run()

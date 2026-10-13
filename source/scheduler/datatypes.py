@@ -26,3 +26,14 @@ type Message = OutputMessage | ErrorMessage | TimeMessage
 class Task[Type]:
     data: Type
     handler: Callable[[Type, Proxy], None]
+
+@dataclass
+class Batch:
+    key: str
+    tasks: list[Task]
+
+@dataclass
+class Function:
+    name: str
+    handler: Callable[[Any, Proxy], None]
+    priority: int

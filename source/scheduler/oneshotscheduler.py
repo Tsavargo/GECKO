@@ -2,8 +2,7 @@ from collections.abc import Callable
 from multiprocessing.connection import Connection
 from typing import Any
 
-from .datatypes import Task
-from .priorityqueue import PriorityQueue
+from .datatypes import Function, Task
 from .scheduler import Scheduler, execute
 
 
@@ -12,8 +11,8 @@ from .scheduler import Scheduler, execute
 class OneShotScheduler(Scheduler):
     """Forks a fresh process for every task, the process exits when the task is done."""
 
-    def __init__(self, queue: PriorityQueue[Task], onOutput: Callable[[str, Any], None], log: Callable[..., None]) -> None:
-        super().__init__(queue, onOutput, log)
+    def __init__(self, functions: dict[str, Function], onExit: Callable[[str, Any], None], log: Callable[..., None]) -> None:
+        super().__init__(functions, onExit, log)
         self.finished: set[Connection] = set()
 
     def dispatch(self, task: Task) -> None:

@@ -22,6 +22,7 @@ resource "aws_lambda_function" "composite" {
   environment {
     variables = {
       OUTPUT_QUEUE_URL = local.next_composite[each.key] == null ? "" : aws_sqs_queue.composite[local.next_composite[each.key]].url
+      SCHEDULER        = var.scheduler
     }
   }
 }
